@@ -31,7 +31,13 @@ import MongoStore from "connect-mongo";
 import AdminJS from "adminjs";
 import { dark, light, noSidebar } from "@adminjs/themes";
 // import MongoStore from 'connect-mongo';
-const { default: serviceAccount } = await import('./noidaFarmsNotificationKey.json', { with: { type: 'json' } });
+let serviceAccount = null;
+try {
+  const accountModule = await import('./noidaFarmsNotificationKey.json', { with: { type: 'json' } });
+  serviceAccount = accountModule.default;
+} catch (error) {
+  console.log('⚠️ noidaFarmsNotificationKey.json not found. Notifications/Firebase Admin might fail if not configured via ENV.');
+}
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
