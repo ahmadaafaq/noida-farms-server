@@ -1981,10 +1981,16 @@ app.post('/AllAdmin/AndAgents/Fetch', async (req, res) => {
 
 // push notification setup 
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+if (!admin.apps.length && serviceAccount) {
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  } catch (error) {
+    console.log('⚠️ Failed to initialize Firebase admin:', error.message);
+  }
+} else if (!serviceAccount) {
+  console.log('⚠️ Skipping Firebase Admin initialization because noidaFarmsNotificationKey.json is missing.');
 }
 
 //  update fcm token
