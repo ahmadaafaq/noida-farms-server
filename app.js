@@ -10,6 +10,8 @@ import nodemailer from 'nodemailer';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
+import multerS3 from 'multer-s3';
+import { S3Client } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
 // import bodyParser from 'body-parser';
 import PDFDocument from 'pdfkit';
@@ -196,6 +198,14 @@ const startAdmin = async () => {
 // ================================
 await startAdmin();
 
+// ================================
+// 🧩 Middleware & Logger
+// ================================
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
 // ✅ Now add parsers AFTER admin router
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
@@ -221,8 +231,8 @@ app.post("/api/example", async (req, res) => {
 // 🧩 Start Server
 // ================================
 const PORT = process.env.PORT || 5002;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
   console.log(`🛠️ AdminJS at http://localhost:${PORT}${adminSet.options.rootPath}`);
 });
 
@@ -530,50 +540,58 @@ app.post('/update-user', async (req, res) => {
 });
 
 
-// Create uploads folder if it doesn’t exist
-const uploadsDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Configure multer storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir); // ✅ use absolute path
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = `${Date.now()}-${Math.round(
-      Math.random() * 1e9
-    )}-${file.originalname}`;
-    cb(null, uniqueSuffix);
+// ─── AWS S3 Client ────────────────────────────────────────────────────────────
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION || 'ap-south-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
 });
 
-const upload = multer({ storage });
+const S3_BUCKET = process.env.AWS_S3_BUCKET;
+const S3_REGION = process.env.AWS_REGION || 'ap-south-1';
 
-// Serve static files from 'uploads' directory
-app.use("/uploads", express.static(uploadsDir));
+// ─── Helper: build public S3 URL from a key ───────────────────────────────────
+const getS3Url = (key) =>
+  `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${key}`;
 
-// Fallback for older images that were saved with absolute paths like `/Users/apple/Downloads/...`
-app.use("/Users/apple/Downloads/noidafarmproject/Archive/uploads", express.static(uploadsDir));
-app.use("/Users/apple/Downloads/Archive/uploads", express.static(uploadsDir));
+// ─── Multer-S3 storage for farmhouse images ───────────────────────────────────
+// NOTE: No `acl` option — modern S3 buckets have ACLs disabled by default.
+// Grant public read via your bucket policy instead (see .env comments).
+const farmhouseStorage = multerS3({
+  s3: s3Client,
+  bucket: S3_BUCKET,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: (req, file, cb) => {
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const ext = path.extname(file.originalname) || '.jpg';
+    cb(null, `farmhouse-images/${uniqueSuffix}${ext}`);
+  },
+});
 
-// API route for image upload
-app.post("/uploadImages", upload.array("images", 10), (req, res) => {
+const upload = multer({
+  storage: farmhouseStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB per file
+});
+
+// API route for image upload (farmhouse photos → S3)
+app.post("/uploadImages", upload.array("images", 35), (req, res) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ message: "No files uploaded" });
     }
 
-    // Return paths of uploaded images relative to the static route
-    const imagePaths = req.files.map((file) => ({ uri: `uploads/${file.filename}` }));
+    // Each file uploaded by multer-s3 has a `location` field = full public S3 URL
+    const imagePaths = req.files.map((file) => ({ uri: file.location }));
 
     res.status(200).json({
       message: "Images uploaded successfully",
       imagePaths,
     });
   } catch (error) {
-    res.status(500).json({ message: "Error uploading images", error });
+    console.error('Upload to S3 failed:', error);
+    res.status(500).json({ message: "Error uploading images", error: error.message });
   }
 });
 
@@ -2114,40 +2132,32 @@ app.post('/send-notification', async (req, res) => {
 });
 
 
-const uploadDir = path.join(__dirname, "notificationimages");
-// Ensure folder exists
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storageImg = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const name = file.fieldname === "small" ? "small.jpg" : "large.jpg";
-    cb(null, name);
+// ─── Multer-S3 storage for notification images ───────────────────────────────
+const notificationStorage = multerS3({
+  s3: s3Client,
+  bucket: S3_BUCKET,
+  contentType: multerS3.AUTO_CONTENT_TYPE,
+  key: (req, file, cb) => {
+    // Preserve "small" vs "large" naming convention expected by the Telegram bot
+    const name = file.originalname.includes('logo') ? 'small.jpg' : 'large.jpg';
+    cb(null, `notification-images/${name}`);
   },
 });
-const uploadImg = multer({ storage: storageImg });
-
+const uploadImg = multer({ storage: notificationStorage });
 
 app.post("/UploadNotificationImages",
   uploadImg.single("file"),
   async (req, res) => {
     try {
-      let filename = req.file.originalname.includes("logo")
-        ? "small.jpg"
-        : "large.jpg";
-
-      const filePath = path.join(uploadDir, filename);
-      fs.renameSync(req.file.path, filePath);
-
-      const url = `/notificationimages/${filename}`;
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+      // multer-s3 stores the full public URL in `req.file.location`
+      const url = req.file.location;
       res.json({ url });
     } catch (err) {
       console.error("Upload error:", err);
-      res.status(500).json({ error: "Upload failed" });
+      res.status(500).json({ error: "Upload failed", details: err.message });
     }
   }
 );
